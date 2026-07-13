@@ -1,0 +1,637 @@
+#include "ui_embarque.h"
+#include "../mapa/menu.h"
+#include "../batallas/navegacion.h"
+#include "recursos.h"
+#include <stdio.h>
+#include <windows.h>
+
+
+// Verifica si la unidad es valida para embarcar (viva, visible, no moviendose)
+static bool unidadDisponible(const Unidad *u) {
+  if (!u)
+    return false;
+  if (u->vida <= 0 || u->tiempoMuerteMs != 0)
+    return false; // Evitar contar unidades muertas como embarcables
+  return u->x >= 0 && u->y >= 0 && !u->moviendose;
+}
+
+// Verifica si la unidad esta en rango de embarque junto al barco
+static bool unidadCercaDeBarco(const Unidad *u, const Barco *barco) {
+  if (!u || !barco)
+    return false;
+  if (u->x < 0 || u->y < 0)
+    return false;
+
+  const float BARCO_SIZE = 192.0f;
+  const float RADIO_EMBARQUE = 250.0f; // Reducido para evitar detectar tropas lejanas
+
+  // Distancia mínima desde la unidad al rectángulo del barco
+  float nearestX = u->x;
+  if (u->x < barco->x)
+    nearestX = barco->x;
+  else if (u->x > barco->x + BARCO_SIZE)
+    nearestX = barco->x + BARCO_SIZE;
+
+  float nearestY = u->y;
+  if (u->y < barco->y)
+    nearestY = barco->y;
+  else if (u->y > barco->y + BARCO_SIZE)
+    nearestY = barco->y + BARCO_SIZE;
+
+  float dx = u->x - nearestX;
+  float dy = u->y - nearestY;
+
+  return (dx * dx + dy * dy) <= (RADIO_EMBARQUE * RADIO_EMBARQUE);
+}
+
+static bool unidadListaParaEmbarcar(const Unidad *u, const Barco *barco) {
+  return unidadDisponible(u) && unidadCercaDeBarco(u, barco);
+}
+
+void menuEmbarqueInicializar(MenuEmbarque *menu) {
+  menu->activo = false;
+  menu->eligiendoIsla = false;
+  menu->mostrandoDesconocido = false;
+  menu->obrerosSeleccionados = 0;
+  menu->caballerosSeleccionados = 0;
+  menu->guerrerosSeleccionados = 0;
+  menu->totalSeleccionados = 0;
+  menu->x = 0;
+  menu->y = 0;
+  menu->ancho = 400;
+  menu->alto = 460;
+}
+
+void menuEmbarqueAbrir(MenuEmbarque *menu, int anchoVentana, int altoVentana) {
+  menu->activo = true;
+  menu->eligiendoIsla = false;
+  menu->mostrandoDesconocido = false;
+  menu->obrerosSeleccionados = 0;
+  menu->caballerosSeleccionados = 0;
+  menu->guerrerosSeleccionados = 0;
+  menu->totalSeleccionados = 0;
+
+  // Centrar el menú en la ventana
+  menu->x = (anchoVentana - menu->ancho) / 2;
+  menu->y = (altoVentana - menu->alto) / 2;
+}
+
+void menuEmbarqueCerrar(MenuEmbarque *menu) { menu->activo = false; }
+
+void menuEmbarqueDibujar(HDC hdc, MenuEmbarque *menu, struct Jugador *j) {
+  if (!menu->activo)
+    return;
+
+  // Fondo del menú
+  HBRUSH hBrushFondo = CreateSolidBrush(RGB(40, 40, 40));
+  HBRUSH hOld = (HBRUSH)SelectObject(hdc, hBrushFondo);
+  Rectangle(hdc, menu->x, menu->y, menu->x + menu->ancho, menu->y + menu->alto);
+  SelectObject(hdc, hOld);
+  DeleteObject(hBrushFondo);
+
+  // Borde
+  HPEN hPenBorde = CreatePen(PS_SOLID, 3, RGB(200, 200, 200));
+  HPEN hPenOld = (HPEN)SelectObject(hdc, hPenBorde);
+  SelectObject(hdc, GetStockObject(NULL_BRUSH));
+  Rectangle(hdc, menu->x, menu->y, menu->x + menu->ancho, menu->y + menu->alto);
+  SelectObject(hdc, hPenOld);
+  DeleteObject(hPenBorde);
+
+  // Título
+  SetBkMode(hdc, TRANSPARENT);
+  SetTextColor(hdc, RGB(255, 255, 255));
+  RECT rectTitulo = {menu->x, menu->y + 10, menu->x + menu->ancho,
+                     menu->y + 40};
+  if (menu->eligiendoIsla) {
+    DrawTextA(hdc, "SELECCIONA ISLA", -1, &rectTitulo,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    int opciones[3];
+    int total = 0;
+    
+    // Verificar si las 3 islas están conquistadas o si el modo debug libera viaje
+    // Verificar si las 3 islas están conquistadas
+    bool desbloqueado = (j->islasConquistadas[1] && j->islasConquistadas[2] && j->islasConquistadas[3]);
+
+    if (!menu->mostrandoDesconocido) {
+        // MODO NORMAL: Islas 1-3 y botón de Continente (si desbloqueado)
+        for (int i = 1; i <= 3; i++) {
+          if (i != j->islaActual) {
+            opciones[total++] = i;
+          }
+        }
+
+        int btnWidth = 260;
+        int btnHeight = 50;
+        int startY = menu->y + 80; // Subir un poco para espacio extra
+        int startX = menu->x + (menu->ancho - btnWidth) / 2;
+
+        for (int i = 0; i < total; i++) {
+          RECT btn = {startX, startY + i * (btnHeight + 10), startX + btnWidth,
+                      startY + i * (btnHeight + 10) + btnHeight};
+          HBRUSH hBrushIsla = CreateSolidBrush(RGB(0, 80, 140));
+          HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hBrushIsla);
+          Rectangle(hdc, btn.left, btn.top, btn.right, btn.bottom);
+          SelectObject(hdc, hOldBrush);
+          DeleteObject(hBrushIsla);
+
+          char label[64];
+          snprintf(label, sizeof(label), "Viajar a Isla %d", opciones[i]);
+          DrawTextA(hdc, label, -1, &btn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        
+        // Botón "Continente Desconocido"
+        if (desbloqueado) {
+             RECT btnDesc = {startX, startY + total * (btnHeight + 10), startX + btnWidth,
+                            startY + total * (btnHeight + 10) + btnHeight};
+             HBRUSH hBrushDesc = CreateSolidBrush(RGB(100, 0, 100)); // Morado misterioso
+             HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hBrushDesc);
+             Rectangle(hdc, btnDesc.left, btnDesc.top, btnDesc.right, btnDesc.bottom);
+             SelectObject(hdc, hOldBrush);
+             DeleteObject(hBrushDesc);
+             
+             DrawTextA(hdc, "CONTINENTE DESCONOCIDO", -1, &btnDesc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+    } else {
+        // MODO SUBMENÚ: Islas 4 y 5
+        int btnWidth = 260;
+        int btnHeight = 50;
+        int startY = menu->y + 80;
+        int startX = menu->x + (menu->ancho - btnWidth) / 2;
+        
+        // Isla 4 (Hielo)
+        RECT btn4 = {startX, startY, startX + btnWidth, startY + btnHeight};
+        HBRUSH hBrush4 = CreateSolidBrush(RGB(0, 200, 255)); // Azul Hielo
+        HBRUSH hOld4 = (HBRUSH)SelectObject(hdc, hBrush4);
+        Rectangle(hdc, btn4.left, btn4.top, btn4.right, btn4.bottom);
+        SelectObject(hdc, hOld4);
+        DeleteObject(hBrush4);
+        DrawTextA(hdc, "Viajar a Isla 4 (Hielo)", -1, &btn4, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        
+        // Isla 5 (Fuego)
+        RECT btn5 = {startX, startY + btnHeight + 10, startX + btnWidth, startY + 2 * btnHeight + 10};
+        HBRUSH hBrush5 = CreateSolidBrush(RGB(200, 50, 0)); // Rojo Fuego
+        HBRUSH hOld5 = (HBRUSH)SelectObject(hdc, hBrush5);
+        Rectangle(hdc, btn5.left, btn5.top, btn5.right, btn5.bottom);
+        SelectObject(hdc, hOld5);
+        DeleteObject(hBrush5);
+        DrawTextA(hdc, "Viajar a Isla 5 (Fuego)", -1, &btn5, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        
+        // Botón Volver
+        RECT btnVolver = {startX, startY + 2 * (btnHeight + 10), startX + btnWidth, startY + 2 * (btnHeight + 10) + btnHeight};
+        HBRUSH hBrushVolver = CreateSolidBrush(RGB(80, 80, 80));
+        HBRUSH hOldVolver = (HBRUSH)SelectObject(hdc, hBrushVolver);
+        Rectangle(hdc, btnVolver.left, btnVolver.top, btnVolver.right, btnVolver.bottom);
+        SelectObject(hdc, hOldVolver);
+        DeleteObject(hBrushVolver);
+        DrawTextA(hdc, "Volver", -1, &btnVolver, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    // Botón cancelar
+    RECT btnCancelar = {menu->x + 50, menu->y + menu->alto - 60,
+                        menu->x + menu->ancho - 50, menu->y + menu->alto - 20};
+    HBRUSH hBrushCancelar = CreateSolidBrush(RGB(120, 0, 0));
+    HBRUSH hOldBrush2 = (HBRUSH)SelectObject(hdc, hBrushCancelar);
+    Rectangle(hdc, btnCancelar.left, btnCancelar.top, btnCancelar.right,
+              btnCancelar.bottom);
+    SelectObject(hdc, hOldBrush2);
+    DeleteObject(hBrushCancelar);
+    DrawTextA(hdc, "CANCELAR", -1, &btnCancelar,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    return;
+  }
+
+  DrawTextA(hdc, "EMBARCAR TROPAS", -1, &rectTitulo,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+  // Contador de tropas
+  char bufferContador[60];
+  snprintf(bufferContador, sizeof(bufferContador),
+           "Tropas seleccionadas: %d / %d", menu->totalSeleccionados,
+           j->barco.capacidadMaxima);
+  RECT rectContador = {menu->x, menu->y + 45, menu->x + menu->ancho,
+                       menu->y + 70};
+  SetTextColor(hdc, (menu->totalSeleccionados == j->barco.capacidadMaxima)
+                        ? RGB(255, 200, 0)
+                        : RGB(200, 200, 200));
+  DrawTextA(hdc, bufferContador, -1, &rectContador,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+  int yOffset = 90;
+  int lineHeight = 60;
+
+  // Contar tropas disponibles
+  int obrerosDisponibles = 0;
+  int caballerosDisponibles = 0;
+  int guerrerosDisponibles = 0;
+
+  for (int i = 0; i < MAX_OBREROS; i++) {
+    if (unidadListaParaEmbarcar(&j->obreros[i], &j->barco))
+      obrerosDisponibles++;
+  }
+  for (int i = 0; i < MAX_CABALLEROS; i++) {
+    if (unidadListaParaEmbarcar(&j->caballeros[i], &j->barco))
+      caballerosDisponibles++;
+  }
+  for (int i = 0; i < MAX_CABALLEROS_SIN_ESCUDO; i++) {
+    if (unidadListaParaEmbarcar(&j->caballerosSinEscudo[i], &j->barco))
+      caballerosDisponibles++;
+  }
+  for (int i = 0; i < MAX_GUERREROS; i++) {
+    if (unidadListaParaEmbarcar(&j->guerreros[i], &j->barco))
+      guerrerosDisponibles++;
+  }
+
+  // Obreros
+  SetTextColor(hdc, RGB(255, 255, 255));
+  char bufferObreros[50];
+  snprintf(bufferObreros, sizeof(bufferObreros), "Obreros: %d / %d",
+           menu->obrerosSeleccionados, obrerosDisponibles);
+  RECT rectObreros = {menu->x + 20, menu->y + yOffset, menu->x + 200,
+                      menu->y + yOffset + 20};
+  DrawTextA(hdc, bufferObreros, -1, &rectObreros,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+  // Botones +/- para obreros
+  RECT btnObreroMenos = {menu->x + 260, menu->y + yOffset, menu->x + 300,
+                         menu->y + yOffset + 30};
+  RECT btnObreroMas = {menu->x + 310, menu->y + yOffset, menu->x + 350,
+                       menu->y + yOffset + 30};
+
+  Rectangle(hdc, btnObreroMenos.left, btnObreroMenos.top, btnObreroMenos.right,
+            btnObreroMenos.bottom);
+  Rectangle(hdc, btnObreroMas.left, btnObreroMas.top, btnObreroMas.right,
+            btnObreroMas.bottom);
+
+  DrawTextA(hdc, "-", -1, &btnObreroMenos,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  DrawTextA(hdc, "+", -1, &btnObreroMas,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+  yOffset += lineHeight;
+
+  // Caballeros
+  char bufferCaballeros[50];
+  snprintf(bufferCaballeros, sizeof(bufferCaballeros), "Caballeros: %d / %d",
+           menu->caballerosSeleccionados, caballerosDisponibles);
+  RECT rectCaballeros = {menu->x + 20, menu->y + yOffset, menu->x + 200,
+                         menu->y + yOffset + 20};
+  DrawTextA(hdc, bufferCaballeros, -1, &rectCaballeros,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+  // Botones +/- para caballeros
+  RECT btnCaballeroMenos = {menu->x + 260, menu->y + yOffset, menu->x + 300,
+                            menu->y + yOffset + 30};
+  RECT btnCaballeroMas = {menu->x + 310, menu->y + yOffset, menu->x + 350,
+                          menu->y + yOffset + 30};
+
+  Rectangle(hdc, btnCaballeroMenos.left, btnCaballeroMenos.top,
+            btnCaballeroMenos.right, btnCaballeroMenos.bottom);
+  Rectangle(hdc, btnCaballeroMas.left, btnCaballeroMas.top,
+            btnCaballeroMas.right, btnCaballeroMas.bottom);
+
+  DrawTextA(hdc, "-", -1, &btnCaballeroMenos,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  DrawTextA(hdc, "+", -1, &btnCaballeroMas,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+  yOffset += lineHeight;
+
+  // Guerreros
+  char bufferGuerreros[50];
+  snprintf(bufferGuerreros, sizeof(bufferGuerreros), "Guerreros: %d / %d",
+           menu->guerrerosSeleccionados, guerrerosDisponibles);
+  RECT rectGuerreros = {menu->x + 20, menu->y + yOffset, menu->x + 200,
+                        menu->y + yOffset + 20};
+  DrawTextA(hdc, bufferGuerreros, -1, &rectGuerreros,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+  // Botones +/- para guerreros
+  RECT btnGuerreroMenos = {menu->x + 260, menu->y + yOffset, menu->x + 300,
+                           menu->y + yOffset + 30};
+  RECT btnGuerreroMas = {menu->x + 310, menu->y + yOffset, menu->x + 350,
+                         menu->y + yOffset + 30};
+
+  Rectangle(hdc, btnGuerreroMenos.left, btnGuerreroMenos.top,
+            btnGuerreroMenos.right, btnGuerreroMenos.bottom);
+  Rectangle(hdc, btnGuerreroMas.left, btnGuerreroMas.top, btnGuerreroMas.right,
+            btnGuerreroMas.bottom);
+
+  DrawTextA(hdc, "-", -1, &btnGuerreroMenos,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  DrawTextA(hdc, "+", -1, &btnGuerreroMas,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+  // Botones de acción
+  yOffset = menu->alto - 60;
+
+  RECT btnEmbarcar = {menu->x + 50, menu->y + yOffset, menu->x + 180,
+                      menu->y + yOffset + 40};
+  RECT btnCancelar = {menu->x + 220, menu->y + yOffset, menu->x + 350,
+                      menu->y + yOffset + 40};
+
+  // Botón Embarcar (habilitado solo si hay tropas seleccionadas)
+  if (menu->totalSeleccionados > 0) {
+    HBRUSH hBrushEmbarcar = CreateSolidBrush(RGB(0, 120, 0));
+    HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hBrushEmbarcar);
+    Rectangle(hdc, btnEmbarcar.left, btnEmbarcar.top, btnEmbarcar.right,
+              btnEmbarcar.bottom);
+    SelectObject(hdc, hOldBrush);
+    DeleteObject(hBrushEmbarcar);
+  } else {
+    Rectangle(hdc, btnEmbarcar.left, btnEmbarcar.top, btnEmbarcar.right,
+              btnEmbarcar.bottom);
+  }
+
+  SetTextColor(hdc, RGB(255, 255, 255));
+  DrawTextA(hdc, "EMBARCAR", -1, &btnEmbarcar,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+  // Botón Cancelar
+  HBRUSH hBrushCancelar = CreateSolidBrush(RGB(120, 0, 0));
+  HBRUSH hOldBrush2 = (HBRUSH)SelectObject(hdc, hBrushCancelar);
+  Rectangle(hdc, btnCancelar.left, btnCancelar.top, btnCancelar.right,
+            btnCancelar.bottom);
+  SelectObject(hdc, hOldBrush2);
+  DeleteObject(hBrushCancelar);
+
+  DrawTextA(hdc, "CANCELAR", -1, &btnCancelar,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+bool menuEmbarqueClick(MenuEmbarque *menu, struct Jugador *j, int x, int y) {
+  if (!menu->activo)
+    return false;
+
+  // Verificar si el click está dentro del menú
+  if (x < menu->x || x > menu->x + menu->ancho || y < menu->y ||
+      y > menu->y + menu->alto) {
+    return false;
+  }
+
+  if (menu->eligiendoIsla) {
+    int opciones[3];
+    int total = 0;
+    for (int i = 1; i <= 3; i++) {
+      if (i != j->islaActual) {
+        opciones[total++] = i;
+      }
+    }
+
+    int btnWidth = 260;
+    int btnHeight = 50;
+    int startY = menu->y + 80;
+    int startX = menu->x + (menu->ancho - btnWidth) / 2;
+    
+    // Verificar desbloqueo o modo debug
+    // Verificar desbloqueo
+    bool desbloqueado = (j->islasConquistadas[1] && j->islasConquistadas[2] && j->islasConquistadas[3]);
+
+    if (!menu->mostrandoDesconocido) {
+        for (int i = 0; i < total; i++) {
+          RECT btn = {startX, startY + i * (btnHeight + 10), startX + btnWidth,
+                      startY + i * (btnHeight + 10) + btnHeight};
+          if (x >= btn.left && x <= btn.right && y >= btn.top && y <= btn.bottom) {
+            bool ok = viajarAIsla(j, opciones[i]);
+            if (ok) {
+              menu->activo = false;
+              menu->eligiendoIsla = false;
+              menu->obrerosSeleccionados = 0;
+              menu->caballerosSeleccionados = 0;
+              menu->guerrerosSeleccionados = 0;
+              menu->totalSeleccionados = 0;
+            } else {
+              menu->activo = true;
+              menu->eligiendoIsla = true;
+            }
+            return true;
+          }
+        }
+        
+        // Click en "Continente Desconocido"
+        if (desbloqueado) {
+             RECT btnDesc = {startX, startY + total * (btnHeight + 10), startX + btnWidth,
+                            startY + total * (btnHeight + 10) + btnHeight};
+             if (x >= btnDesc.left && x <= btnDesc.right && y >= btnDesc.top && y <= btnDesc.bottom) {
+                 menu->mostrandoDesconocido = true;
+                 return true;
+             }
+        }
+    } else {
+        // MODO SUBMENÚ
+        // Isla 4
+        RECT btn4 = {startX, startY, startX + btnWidth, startY + btnHeight};
+        if (x >= btn4.left && x <= btn4.right && y >= btn4.top && y <= btn4.bottom) {
+            // Viajar a isla 4
+            if (viajarAIsla(j, 4)) {
+              menu->activo = false;
+              menu->eligiendoIsla = false;
+              menu->mostrandoDesconocido = false;
+              menu->totalSeleccionados = 0;
+            }
+            return true;
+        }
+        
+        // Isla 5
+        RECT btn5 = {startX, startY + btnHeight + 10, startX + btnWidth, startY + 2 * btnHeight + 10};
+        if (x >= btn5.left && x <= btn5.right && y >= btn5.top && y <= btn5.bottom) {
+            // Viajar a isla 5
+            if (viajarAIsla(j, 5)) {
+              menu->activo = false;
+              menu->eligiendoIsla = false;
+              menu->mostrandoDesconocido = false;
+              menu->totalSeleccionados = 0;
+            }
+            return true;
+        }
+        
+        // Volver
+        RECT btnVolver = {startX, startY + 2 * (btnHeight + 10), startX + btnWidth, startY + 2 * (btnHeight + 10) + btnHeight};
+        if (x >= btnVolver.left && x <= btnVolver.right && y >= btnVolver.top && y <= btnVolver.bottom) {
+             menu->mostrandoDesconocido = false;
+             return true;
+        }
+    }
+
+    // Botón cancelar
+    RECT btnCancelar = {menu->x + 50, menu->y + menu->alto - 60, menu->x + menu->ancho - 50, menu->y + menu->alto - 20};
+    if (x >= btnCancelar.left && x <= btnCancelar.right && y >= btnCancelar.top && y <= btnCancelar.bottom) {
+      // Si hay tropas en el barco (ocultas), devolverlas a tierra
+      if (j->barco.numTropas > 0) {
+        desembarcarTropas(&j->barco, j);
+      }
+      // Cerrar y limpiar selección
+      menuEmbarqueCerrar(menu);
+      menu->obrerosSeleccionados = 0;
+      menu->caballerosSeleccionados = 0;
+      menu->guerrerosSeleccionados = 0;
+      menu->totalSeleccionados = 0;
+      menu->eligiendoIsla = false;
+      menu->mostrandoDesconocido = false;
+      return true;
+    }
+    return true;
+  }
+
+  int yOffset = 90;
+  int lineHeight = 60;
+
+  // Contar tropas disponibles
+  int obrerosDisponibles = 0;
+  int caballerosDisponibles = 0;
+  int guerrerosDisponibles = 0;
+
+  for (int i = 0; i < MAX_OBREROS; i++) {
+    if (unidadListaParaEmbarcar(&j->obreros[i], &j->barco))
+      obrerosDisponibles++;
+  }
+  for (int i = 0; i < MAX_CABALLEROS; i++) {
+    if (unidadListaParaEmbarcar(&j->caballeros[i], &j->barco))
+      caballerosDisponibles++;
+  }
+  for (int i = 0; i < MAX_CABALLEROS_SIN_ESCUDO; i++) {
+    if (unidadListaParaEmbarcar(&j->caballerosSinEscudo[i], &j->barco))
+      caballerosDisponibles++;
+  }
+  for (int i = 0; i < MAX_GUERREROS; i++) {
+    if (unidadListaParaEmbarcar(&j->guerreros[i], &j->barco))
+      guerrerosDisponibles++;
+  }
+
+  // Botones de obreros
+  if (x >= menu->x + 260 && x <= menu->x + 300 && y >= menu->y + yOffset &&
+      y <= menu->y + yOffset + 30) {
+    // Botón - obreros
+    if (menu->obrerosSeleccionados > 0) {
+      menu->obrerosSeleccionados--;
+      menu->totalSeleccionados--;
+    }
+    return true;
+  }
+
+  if (x >= menu->x + 310 && x <= menu->x + 350 && y >= menu->y + yOffset &&
+      y <= menu->y + yOffset + 30) {
+    // Botón + obreros
+    if (menu->obrerosSeleccionados < obrerosDisponibles &&
+        menu->totalSeleccionados < j->barco.capacidadMaxima) {
+      menu->obrerosSeleccionados++;
+      menu->totalSeleccionados++;
+    }
+    return true;
+  }
+
+  yOffset += lineHeight;
+
+  // Botones de caballeros
+  if (x >= menu->x + 260 && x <= menu->x + 300 && y >= menu->y + yOffset &&
+      y <= menu->y + yOffset + 30) {
+    // Botón - caballeros
+    if (menu->caballerosSeleccionados > 0) {
+      menu->caballerosSeleccionados--;
+      menu->totalSeleccionados--;
+    }
+    return true;
+  }
+
+  if (x >= menu->x + 310 && x <= menu->x + 350 && y >= menu->y + yOffset &&
+      y <= menu->y + yOffset + 30) {
+    // Botón + caballeros
+    if (menu->caballerosSeleccionados < caballerosDisponibles &&
+        menu->totalSeleccionados < j->barco.capacidadMaxima) {
+      menu->caballerosSeleccionados++;
+      menu->totalSeleccionados++;
+    }
+    return true;
+  }
+
+  yOffset += lineHeight;
+
+  // Botones de guerreros
+  if (x >= menu->x + 260 && x <= menu->x + 300 && y >= menu->y + yOffset &&
+      y <= menu->y + yOffset + 30) {
+    // Botón - guerreros
+    if (menu->guerrerosSeleccionados > 0) {
+      menu->guerrerosSeleccionados--;
+      menu->totalSeleccionados--;
+    }
+    return true;
+  }
+
+  if (x >= menu->x + 310 && x <= menu->x + 350 && y >= menu->y + yOffset &&
+      y <= menu->y + yOffset + 30) {
+    // Botón + guerreros
+    if (menu->guerrerosSeleccionados < guerrerosDisponibles &&
+        menu->totalSeleccionados < j->barco.capacidadMaxima) {
+      menu->guerrerosSeleccionados++;
+      menu->totalSeleccionados++;
+    }
+    return true;
+  }
+
+  // Botones de acción
+  yOffset = menu->alto - 60;
+
+  // Botón EMBARCAR
+  if (x >= menu->x + 50 && x <= menu->x + 180 && y >= menu->y + yOffset &&
+      y <= menu->y + yOffset + 40) {
+    if (menu->totalSeleccionados > 0) {
+      menuEmbarqueEmbarcar(menu, j);
+    }
+    return true;
+  }
+
+  // Botón CANCELAR
+  if (x >= menu->x + 220 && x <= menu->x + 350 && 
+      y >= menu->y + yOffset && y <= menu->y + yOffset + 40) {
+    // Si el usuario cancela antes de elegir isla, devolver tropas al mapa si ya se embarcaron
+    if (j->barco.numTropas > 0) {
+      desembarcarTropas(&j->barco, j);
+    }
+    menuEmbarqueCerrar(menu);
+    menu->obrerosSeleccionados = 0;
+    menu->caballerosSeleccionados = 0;
+    menu->guerrerosSeleccionados = 0;
+    menu->totalSeleccionados = 0;
+    return true;
+  }
+
+  return true; // Click dentro del menú, consumir evento
+}
+
+// Helper genérico para embarcar un grupo de unidades
+static void embarcarGrupoUnidad(Unidad *array, int maxUnidades, int *cantidadEmbarcadaRef, int limiteSeleccion, Barco *barco) {
+  for (int i = 0; i < maxUnidades && *cantidadEmbarcadaRef < limiteSeleccion; i++) {
+    if (unidadListaParaEmbarcar(&array[i], barco) &&
+        barco->numTropas < barco->capacidadMaxima) {
+      // Guardar puntero en el barco
+      barco->tropas[barco->numTropas++] = &array[i];
+
+      // Ocultar unidad del mapa
+      array[i].x = -1000;
+      array[i].y = -1000;
+
+      (*cantidadEmbarcadaRef)++;
+    }
+  }
+}
+
+void menuEmbarqueEmbarcar(MenuEmbarque *menu, struct Jugador *j) {
+  // Embarcar obreros
+  int obrerosEmbarcados = 0;
+  embarcarGrupoUnidad(j->obreros, MAX_OBREROS, &obrerosEmbarcados, menu->obrerosSeleccionados, &j->barco);
+
+  // Embarcar caballeros (con y sin escudo)
+  int caballerosEmbarcados = 0;
+  embarcarGrupoUnidad(j->caballeros, MAX_CABALLEROS, &caballerosEmbarcados, menu->caballerosSeleccionados, &j->barco);
+  // Nota: Los caballeros sin escudo comparten el contador 'caballerosSeleccionados' con los normales en este menú?
+  // El código original usaba 'caballerosEmbarcados < menu->caballerosSeleccionados' para AMBOS bucles de forma secuencial.
+  // Así que si seleccionas 5 caballeros, llena con escudados primero y luego sin escudo si falta.
+  embarcarGrupoUnidad(j->caballerosSinEscudo, MAX_CABALLEROS_SIN_ESCUDO, &caballerosEmbarcados, menu->caballerosSeleccionados, &j->barco);
+
+  // Embarcar guerreros
+  int guerrerosEmbarcados = 0;
+  embarcarGrupoUnidad(j->guerreros, MAX_GUERREROS, &guerrerosEmbarcados, menu->guerrerosSeleccionados, &j->barco);
+
+  // Abrir selección de isla dentro del juego
+  menu->eligiendoIsla = true;
+}
